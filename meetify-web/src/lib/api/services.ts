@@ -109,6 +109,29 @@ const EXT_BY_MIME: Record<string, string> = {
 export const recordingService = {
   create: (meeting_id: string) => api.post<Recording>(`/recordings/${meeting_id}`),
 
+  /** Fetch the latest device audio, then store it in the recording. */
+  fetchFromDevice: async (recording_id: string) => {
+    const response = await fetch("/api/audio/latest", { cache: "no-store" });
+    if (!response.ok) {
+      const error = new Error(
+        response.status === 404
+          ? "No audio is available. Connect the device and record audio first."
+          : `Audio device request failed (${response.status})`
+      ) as ApiError;
+      error.status = response.status;
+      throw error;
+    }
+
+    const blob = await response.blob();
+    if (blob.size === 0) {
+      const error = new Error("The device returned an empty audio file.") as ApiError;
+      error.status = 404;
+      throw error;
+    }
+
+    return recordingService.upload(recording_id, blob);
+  },
+
   /** Upload a recorded audio Blob captured via MediaRecorder in the browser. */
   upload: async (recording_id: string, blob: Blob) => {
     const mimeType = blob.type?.split(";")[0] || "audio/webm";

@@ -20,7 +20,7 @@ import { saveStoredResult } from "@/lib/utils/resultCache";
 import { getFriendlyMessage } from "@/lib/utils/format";
 import { toast } from "@/lib/store/toastStore";
 import type { Meeting } from "@/lib/types";
-import { Mic, Square, Settings, Users, MapPin, Loader2 } from "lucide-react";
+import { Mic, Square, Settings, Users, MapPin, Loader2, DownloadCloud } from "lucide-react";
 
 const phaseCopy: Record<RecordingPhase, { label: string; hint: string }> = {
   ready: { label: "Ready to record", hint: "Tap the button below to start" },
@@ -39,9 +39,18 @@ const PREFERRED_MIME_TYPES = [
   "audio/ogg;codecs=opus",
 ];
 
+const DEVICE_STORAGE_KEY = "meetify:connected-device";
+
 function pickMimeType(): string | undefined {
   if (typeof MediaRecorder === "undefined") return undefined;
   return PREFERRED_MIME_TYPES.find((t) => MediaRecorder.isTypeSupported(t));
+}
+
+interface ConnectedDevice {
+  hostIp: string;
+  port: number;
+  deviceName: string;
+  connectedAt: number;
 }
 
 export default function RecordingPage() {
@@ -55,6 +64,8 @@ export default function RecordingPage() {
   const [loadingMeeting, setLoadingMeeting] = useState(true);
   const [phase, setPhase] = useState<RecordingPhase>("ready");
   const [setupOpen, setSetupOpen] = useState(false);
+  const [connectedDevice, setConnectedDevice] = useState<ConnectedDevice | null>(null);
+  const [isFetchingDevice, setIsFetchingDevice] = useState(false);
 
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -80,6 +91,25 @@ export default function RecordingPage() {
     };
   }, [meetingId]);
 
+  // Restore last-connected device so the fetch button knows where to pull
+  // from, even after a page reload.
+  useEffect(() => {
+    let mounted = true;
+    try {
+      const raw = localStorage.getItem(DEVICE_STORAGE_KEY);
+      if (raw) {
+        queueMicrotask(() => {
+          if (mounted) setConnectedDevice(JSON.parse(raw));
+        });
+      }
+    } catch {
+      // ignore malformed/unavailable storage
+    }
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   useEffect(() => {
     return () => {
       streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -87,6 +117,20 @@ export default function RecordingPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  function handleDeviceProvisioned(
+    _result: unknown,
+    info: { hostIp: string; port: number; deviceName: string }
+  ) {
+    const device: ConnectedDevice = { ...info, connectedAt: Date.now() };
+    setConnectedDevice(device);
+    try {
+      localStorage.setItem(DEVICE_STORAGE_KEY, JSON.stringify(device));
+    } catch {
+      // ignore storage failures — connection still works for this session
+    }
+    setSetupOpen(false);
+  }
 
   async function startRecording() {
     try {
@@ -168,8 +212,73 @@ export default function RecordingPage() {
     }
   }
 
+  // Pulls the most recent audio the paired hardware device has streamed to
+  // your server (hostIp:port), then runs it through the same
+  // transcribe -> classify pipeline as a browser recording.
+  async function fetchLatestFromDevice() {
+    if (!connectedDevice) {
+      toast.warning(
+        "Pair a recorder in Device settings before fetching audio.",
+        "Connect a device first"
+      );
+      setSetupOpen(true);
+      return;
+    }
+
+    setIsFetchingDevice(true);
+    setPhase("uploading");
+
+    try {
+      const rec = await recordingService.create(meetingId);
+      recordingIdRef.current = rec.id;
+
+      // Requires a `fetchFromDevice` method on recordingService that asks the
+      // backend for the latest audio buffered from this device.
+      await recordingService.fetchFromDevice(rec.id);
+
+      setPhase("transcribing");
+      const transcriptionRes = await transcriptionService.transcribe(rec.id);
+
+      setPhase("classifying");
+      const result = await classificationService.classify(transcriptionRes.transcript_id);
+
+      setPhase("done");
+
+      saveStoredResult(meetingId, {
+        transcriptId: transcriptionRes.transcript_id,
+        transcript: transcriptionRes.transcript,
+        result,
+      });
+
+      setTimeout(() => {
+        router.replace(`/meetings/${meetingId}`);
+      }, 800);
+    } catch (err) {
+      setConnectedDevice(null);
+      try {
+        localStorage.removeItem(DEVICE_STORAGE_KEY);
+      } catch {
+        // ignore storage failures
+      }
+      setPhase("warning");
+      toast.warning(
+        getFriendlyMessage(
+          err,
+          "Couldn't fetch audio from the device. Connect it and make sure it is powered on and connected to Wi-Fi."
+        ),
+        (err as { status?: number })?.status === 404 ? "No audio found" : undefined
+      );
+    } finally {
+      setIsFetchingDevice(false);
+    }
+  }
+
   const isProcessing = phase === "uploading" || phase === "transcribing" || phase === "classifying";
-  const copy = phaseCopy[phase];
+  const baseCopy = phaseCopy[phase];
+  const copy =
+    isFetchingDevice && phase === "uploading"
+      ? { label: "Fetching audio…", hint: "Pulling the latest recording from your device" }
+      : baseCopy;
 
   return (
     <>
@@ -236,14 +345,32 @@ export default function RecordingPage() {
                 ))}
               </div>
             )}
+
+            {connectedDevice && phase === "ready" && (
+              <p className="mt-4 text-[12px] text-ink-faint">
+                Device configured: {connectedDevice.deviceName} ({connectedDevice.hostIp}:
+                {connectedDevice.port})
+              </p>
+            )}
           </div>
 
           <div className="flex flex-col gap-2.5 pb-4 pt-6">
             {phase === "ready" && (
-              <Button icon={<Mic className="h-4 w-4" />} onClick={startRecording} fullWidth>
-                Start recording
-              </Button>
+              <>
+                <Button icon={<Mic className="h-4 w-4" />} onClick={startRecording} fullWidth>
+                  Start recording
+                </Button>
+                <Button
+                  icon={<DownloadCloud className="h-4 w-4" />}
+                  variant="outline"
+                  onClick={fetchLatestFromDevice}
+                  fullWidth
+                >
+                  Fetch latest audio from device
+                </Button>
+              </>
             )}
+
             {phase === "recording" && (
               <Button
                 icon={<Square className="h-4 w-4" />}
@@ -254,11 +381,13 @@ export default function RecordingPage() {
                 Stop &amp; process
               </Button>
             )}
+
             {phase === "warning" && (
               <Button variant="outline" fullWidth onClick={() => setPhase("ready")}>
                 Try again
               </Button>
             )}
+
             <Button
               variant="outline"
               fullWidth
@@ -274,9 +403,9 @@ export default function RecordingPage() {
       <DeviceSetupModal
         open={setupOpen}
         onClose={() => setSetupOpen(false)}
-        defaultHostIp="192.168.1.50"
-        defaultPort="8000"
-        onProvisioned={() => setSetupOpen(false)}
+        defaultHostIp={connectedDevice?.hostIp ?? "192.168.1.50"}
+        defaultPort={connectedDevice ? String(connectedDevice.port) : "8000"}
+        onProvisioned={handleDeviceProvisioned}
       />
     </>
   );

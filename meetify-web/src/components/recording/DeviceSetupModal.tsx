@@ -36,7 +36,10 @@ export function DeviceSetupModal({
   onClose: () => void;
   defaultHostIp?: string;
   defaultPort?: string;
-  onProvisioned?: (result: ProvisionResult) => void;
+  onProvisioned?: (
+    result: ProvisionResult,
+    info: { hostIp: string; port: number; deviceName: string }
+  ) => void;
 }) {
   const [ssid, setSsid] = useState("");
   const [password, setPassword] = useState("");
@@ -86,13 +89,18 @@ export function DeviceSetupModal({
     setPhase("requesting");
     try {
       const device = await requestDevice();
-      setDeviceName(device.name || "Meetify device");
+      const resolvedName = device.name || "Meetify device";
+      setDeviceName(resolvedName);
       setPhase("provisioning");
 
       const res = await provision(device, { ssid, password, hostIp, port: portNum }, setStage);
       setResult(res);
       setPhase("success");
-      onProvisioned?.(res);
+      onProvisioned?.(res, {
+        hostIp: hostIp.trim(),
+        port: portNum,
+        deviceName: resolvedName,
+      });
     } catch (err) {
       // User dismissing the native picker throws a NotFoundError — treat as a
       // quiet cancel back to the form rather than an error state.
