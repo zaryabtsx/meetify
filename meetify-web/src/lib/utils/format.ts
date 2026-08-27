@@ -36,7 +36,7 @@ export function getFriendlyMessage(
   }
 
   if (/duplicate|already|exists|409|uploaded/i.test(message)) {
-    return "This recording looks like it was already uploaded. Please continue with a new recording, or try again only if the previous upload did not complete.";
+    return "This email is already registered. Please log in instead, or use a different email to sign up.";
   }
 
   if (/network|failed to fetch|connection/i.test(message)) {
